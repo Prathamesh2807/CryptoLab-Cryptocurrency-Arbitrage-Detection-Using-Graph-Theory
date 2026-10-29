@@ -47,106 +47,102 @@ class ArbitrageResult:
         }
 
 
-def detect_arbitrage(graph: Any, tolerance: float = 1e-9) -> ArbitrageResult:
-    """
-    Detect whether a negative-weight cycle (arbitrage opportunity) exists
-    anywhere in the directed graph using a custom Bellman-Ford implementation.
 
-    Features:
-    - Supports disconnected components by initializing all vertex distances to 0.0.
-    - Uses custom Python relaxation loops (no third-party cycle detection functions).
-    - Backtracks predecessor pointers to reliably reconstruct the exact directed cycle.
-    - Validates all cycle edges and verifies rate product > 1 before reporting.
+def detect_arbitrage(graph, tolerance=1e-9):
 
-    Args:
-        graph: NetworkX DiGraph produced by src.graph_builder.
-        tolerance: Numerical tolerance for floating-point comparisons (default 1e-9).
-
-    Returns:
-        ArbitrageResult: Comprehensive result containing detection flag, reconstructed cycle,
-            weight sum, and rate product.
-    """
+    # Step 1: Check whether the graph has enough edges and currencies
     if graph is None or graph.number_of_nodes() < 2 or graph.number_of_edges() < 2:
         return ArbitrageResult(
             has_arbitrage=False,
-            cycle=None,
-            log_weight_sum=None,
-            rate_product=None,
-            description="Graph has insufficient vertices or edges to form an arbitrage cycle.",
+            description="Graph has insufficient vertices or edges to form an arbitrage cycle."
         )
 
-    vertices: List[str] = list(graph.nodes())
-    num_vertices: int = len(vertices)
+    vertices = list(graph.nodes())
+    num_vertices = len(vertices)
 
-    # 1. Initialize distances to 0.0 for ALL vertices.
-    # Conceptually, this is equivalent to adding a virtual source node connected to
-    # every vertex with 0-weight edges. It guarantees that negative cycles in any
-    # disconnected component are reachable and detectable without choosing an arbitrary source.
-    distance: Dict[str, float] = {v: 0.0 for v in vertices}
-    predecessor: Dict[str, Optional[str]] = {v: None for v in vertices}
+    # Step 2: Initially, give every currency a distance of zero
+    distance = {}
+    predecessor = {}
 
-    # Extract all directed edges as (source, target, weight) tuples
-    edges: List[Tuple[str, str, float]] = []
-    for u, v, data in graph.edges(data=True):
+    for currency in vertices:
+        distance[currency] = 0.0
+        predecessor[currency] = None
+
+    # Step 3: Store all exchange edges and their weights
+    edges = []
+
+    for source, target, data in graph.edges(data=True):
         weight = data.get("weight")
+
         if weight is None:
-            raise ValueError(f"Edge ({u}, {v}) is missing required 'weight' attribute.")
-        edges.append((u, v, float(weight)))
+            raise ValueError(f"Missing weight on edge {source} -> {target}")
 
-    # 2. Relax edges |V| - 1 times
-    # In a graph with no negative cycles, the shortest path between any two vertices
-    # contains at most |V| - 1 edges.
+        edges.append((source, target, float(weight)))
+
+    # Step 4: Apply Bellman-Ford relaxation |V| - 1 times
     for _ in range(num_vertices - 1):
-        updated = False
-        for u, v, weight in edges:
-            if distance[u] + weight < distance[v] - tolerance:
-                distance[v] = distance[u] + weight
-                predecessor[v] = u
-                updated = True
 
-        # Early termination: if no edge relaxed in a pass, shortest paths have converged
-        if not updated:
-            return ArbitrageResult(
-                has_arbitrage=False,
-                cycle=None,
-                log_weight_sum=None,
-                rate_product=None,
-                description="No arbitrage opportunity detected (shortest paths converged).",
+        for source, target, weight in edges:
+
+            new_distance = distance[source] + weight
+
+            if new_distance < distance[target] - tolerance:
+                distance[target] = new_distance
+                predecessor[target] = source
+
+    # Step 5: Check whether any edge can still be improved
+    # If it can, a negative-weight cycle may exist
+    for source, target, weight in edges:
+
+        new_distance = distance[source] + weight
+
+        if new_distance < distance[target] - tolerance:
+
+            # Update the predecessor so we can trace the cycle
+            predecessor[target] = source
+
+            # Step 6: Reconstruct the cycle using the existing helper
+            cycle = _extract_cycle(
+                predecessor,
+                target,
+                num_vertices
             )
 
-    # 3. Pass |V|: Detect negative-weight cycles
-    # If any edge can still be relaxed after |V| - 1 passes, a negative cycle exists.
-    for u, v, weight in edges:
-        if distance[u] + weight < distance[v] - tolerance:
-            # Record predecessor update for the relaxing edge
-            predecessor[v] = u
+            if cycle is None:
+                continue
 
-            # Extract cycle from predecessor pointers
-            candidate_cycle = _extract_cycle(predecessor, v, num_vertices)
-            if candidate_cycle:
-                validation = _validate_and_evaluate_cycle(graph, candidate_cycle, tolerance)
-                if validation is not None:
-                    log_weight_sum, rate_product = validation
-                    cycle_str = " -> ".join(candidate_cycle)
-                    return ArbitrageResult(
-                        has_arbitrage=True,
-                        cycle=candidate_cycle,
-                        log_weight_sum=log_weight_sum,
-                        rate_product=rate_product,
-                        description=(
-                            f"Profitable arbitrage opportunity detected along cycle: {cycle_str}. "
-                            f"Gross rate product: {rate_product:.6f} "
-                            f"(logarithmic weight sum: {log_weight_sum:.6f})."
-                        ),
-                    )
+            # Step 7: Verify that the cycle is valid and profitable
+            result = _validate_and_evaluate_cycle(
+                graph,
+                cycle,
+                tolerance
+            )
 
+            if result is None:
+                continue
+
+            log_weight_sum, rate_product = result
+            cycle_text = " -> ".join(cycle)
+
+            # Step 8: Return the profitable arbitrage opportunity
+            return ArbitrageResult(
+                has_arbitrage=True,
+                cycle=cycle,
+                log_weight_sum=log_weight_sum,
+                rate_product=rate_product,
+                description=(
+                    f"Profitable arbitrage detected: {cycle_text}. "
+                    f"Rate product: {rate_product:.6f}. "
+                    f"Log weight sum: {log_weight_sum:.6f}."
+                )
+            )
+
+    # No valid profitable cycle was found
     return ArbitrageResult(
         has_arbitrage=False,
-        cycle=None,
-        log_weight_sum=None,
-        rate_product=None,
-        description="No arbitrage opportunity detected (no negative-weight cycle found).",
+        description="No arbitrage opportunity detected."
     )
+
 
 
 def _extract_cycle(predecessor: Dict[str, Optional[str]], start_vertex: str, num_vertices: int) -> Optional[List[str]]:
